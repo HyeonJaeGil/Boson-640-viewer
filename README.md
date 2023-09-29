@@ -27,6 +27,7 @@ Video is 8 bits is directly paintable, linear transformation happens inside the
 ./BosonUSB 1       ->  opens Boson640 /dev/video1  in RAW16 mode
 ./BosonUSB fcap -> creates a folder named 'cap' and inside TIFF files (raw16, agc) will be
 located.
+./BosonUSB fcap s10 -> creates a folder named 'cap' and inside TIFF files (raw16, agc) will be saved at 10 FPS.
 ./BosonUSB fcap t100 -> creates a folder named 'cap' and stores them as TIFF files (only captures 100 frames)		
 ```
 ## To compile

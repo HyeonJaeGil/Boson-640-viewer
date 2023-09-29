@@ -10,21 +10,25 @@
 -  of showing how to make that image displayable                       -
 ------------------------------------------------------------------------
 
- BosonUSB [t/f] [0..9]
+ BosonUSB [t/f/s] [0..9]
         f<name> : record TIFFS in Folder <NAME>
         t<number> : number of frames to record
+        s<number> : recording FPS
         [0..9]  : linux video port
 
 ./BosonUSB         ->  opens Boson640 /dev/video0  in RAW16 mode
 ./BosonUSB 1       ->  opens Boson640 /dev/video1  in RAW16 mode
 ./BosonUSB fcap -> creates a folder named 'cap' and inside TIFF files (raw16, agc) will be
 located.
+./BosonUSB fcap s10 -> creates a folder named 'cap' and inside TIFF files (raw16, agc) will be
+saved at 10 FPS
 ./BosonUSB fcap t100 -> creates a folder named 'cap' and inside TIFF files (raw16, agc) will be
 located. Stops after 100 frames
 */
 
 #include <asm/types.h> // videodev2.h
-#include <fcntl.h>     // open, O_RDWR
+#include <ctime>
+#include <fcntl.h> // open, O_RDWR
 #include <linux/videodev2.h>
 #include <opencv2/opencv.hpp>
 #include <stdio.h>
@@ -34,10 +38,8 @@ located. Stops after 100 frames
 #include <sys/types.h>
 #include <unistd.h> // close
 
-#define YUV 0
-#define RAW16 1
-
 using namespace cv;
+using namespace std;
 
 #define v_major 1
 #define v_minor 0
@@ -100,6 +102,22 @@ void AGC_Basic_Linear(Mat input_16, Mat output_8, int height, int width) {
   }
 }
 
+char* unix_timestamp() {
+  static char timestamp[20];
+  auto now = std::chrono::high_resolution_clock::now();
+  auto now_ns = std::chrono::time_point_cast<std::chrono::nanoseconds>(now);
+  auto epoch_ns = now_ns.time_since_epoch();
+  sprintf(timestamp, "%019ld", epoch_ns.count());
+  return timestamp;
+}
+
+
+double t_diff(char *t1, char *t2) {
+  std::int64_t t1_ns = std::atoll(t1);
+  std::int64_t t2_ns = std::atoll(t2);
+  return (t2_ns - t1_ns) / 1e9;
+}
+
 /* ---------------------------- Other Aux functions ---------------------------------------*/
 
 // HELP INFORMATION
@@ -107,6 +125,7 @@ void print_help() {
   printf(CYN "Boson Capture and Record Video tool v%i.%i" WHT "\n", v_major, v_minor);
   printf(CYN "FLIR Systems" WHT "\n\n");
   printf(WHT "Use : " YEL "'BosonUSB f<name>' " WHT "record TIFFS in Folder <NAME>\n");
+  printf(WHT "Use : " YEL "'BosonUSB f<name> s<fps>' " WHT "record TIFFS in Folder <NAME> at <FPS>\n");
   printf(WHT "Use : " YEL "'BosonUSB f<name> t<frame_count>' " WHT
              "record TIFFS in Folder <NAME> and stop recording after <FRAME_COUNT> frames\n");
   printf(WHT "Use : " YEL "'BosonUSB [0..9]'   " WHT "to open /dev/Video[0..9]  (default 0)\n");
@@ -121,6 +140,8 @@ int main(int argc, char **argv) {
   int fd;
   int i;
   struct v4l2_capability cap;
+  double fps = -1.0;            // Frames per second
+  char last_timestamp[20];      // To store the last timestamp
   long frame = 0;               // First frame number enumeration
   char video[20];               // To store Video Port Device
   char display_window[50];      // To display the information
@@ -161,6 +182,16 @@ int main(int argc, char **argv) {
     // Look for feedback in ASCII
     if (argv[i][0] >= '0' && argv[i][0] <= '9') {
       sprintf(video, "/dev/video%c", argv[i][0]);
+    }
+    // Look for FPS
+    if (argv[i][0] == 's') {
+        // check if there is a number after s, and the number is between 0 and 30
+        if (isdigit(argv[i][1]) == 0 || atof(argv[i] + 1) < 0 || atof(argv[i] + 1) > 30) {
+            printf(RED ">>> FPS value is invalid. Please enter a number between 0 and 30\n" WHT);
+            exit(1);
+        }
+        fps = atof(argv[i] + 1);
+        printf(WHT ">>> FPS to record =" YEL "%f" WHT "\n", fps);
     }
     // Look for frame count
     if (argv[i][0] == 't') {
@@ -260,7 +291,7 @@ int main(int argc, char **argv) {
     perror(RED "mmap" WHT);
     exit(1);
   }
-  // Fill this buffer with ceros. Initialization. Optional but nice to do
+  // Fill this buffer with zeros. Initialization. Optional but nice to do
   memset(buffer_start, 0, bufferinfo.length);
 
   // Activate streaming
@@ -274,8 +305,20 @@ int main(int argc, char **argv) {
   Mat thermal16(height, width, CV_16U, buffer_start);
   Mat thermal16_linear(height, width, CV_8U, 1);
 
+  memcpy(last_timestamp, unix_timestamp(), 20);
+  printf("Last timestamp: %s\n", last_timestamp);
+
   // Read frame, do AGC, and show it
   for (;;) {
+    auto timestamp = unix_timestamp();
+    auto timestamp_diff = t_diff(last_timestamp, timestamp);
+    if (fps > 0 && timestamp_diff < 1 / fps) {
+      continue;
+    }
+    else{
+      memcpy(last_timestamp, timestamp, 20);
+      // printf("FPS: %f\n", 1 / timestamp_diff);
+    }
 
     // Put the buffer in the incoming queue.
     if (ioctl(fd, VIDIOC_QBUF, &bufferinfo) < 0) {
@@ -296,17 +339,6 @@ int main(int argc, char **argv) {
     // Display thermal after 16-bits AGC... will display an image
     imshow(display_window, thermal16_linear);
 
-    if (record_enable == 1) {
-      // filename should be raw16/frame_number.tiff
-      sprintf(filename, "raw/%lu.tiff", frame);
-      imwrite(filename, thermal16, compression_params);
-
-      // filename should be agc/frame_number.tiff
-      sprintf(filename, "agc/%lu.tiff", frame);
-      imwrite(filename, thermal16_linear, compression_params);
-      frame++;
-    }
-
     // Press 'q' to exit
     if (waitKey(1) ==
         'q') { // 0x20 (SPACE) ; need a small delay !! we use this to also add an exit option
@@ -317,6 +349,14 @@ int main(int argc, char **argv) {
     if (video_frames > 0 && frame + 1 > video_frames) {
       printf(WHT ">>>" GRN "'Done'" WHT " Frame limit reached, Quitting !\n");
       break;
+    }
+
+    if (record_enable == 1) {
+      sprintf(filename, "raw/%s.tiff", timestamp);
+      imwrite(filename, thermal16, compression_params);
+      sprintf(filename, "agc/%s.tiff", timestamp);
+      imwrite(filename, thermal16_linear, compression_params);
+      frame++;
     }
   }
   // Finish Loop . Exiting.
